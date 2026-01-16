@@ -19,14 +19,17 @@ package portforward
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
 
 	corev1 "k8s.io/api/core/v1"
@@ -56,6 +59,7 @@ type PortForwardOptions struct {
 	PodClient     corev1client.PodsGetter
 	Address       []string
 	Ports         []string
+	Browser       string
 	PortForwarder portForwarder
 	StopChannel   chan struct{}
 	ReadyChannel  chan struct{}
@@ -116,6 +120,7 @@ func NewCmdPortForward(f cmdutil.Factory, streams genericiooptions.IOStreams) *c
 	}
 	cmdutil.AddPodRunningTimeoutFlag(cmd, defaultPodPortForwardWaitTimeout)
 	cmd.Flags().StringSliceVar(&opts.Address, "address", []string{"localhost"}, "Addresses to listen on (comma separated). Only accepts IP addresses or localhost as a value. When localhost is supplied, kubectl will try to bind on both 127.0.0.1 and ::1 and will fail if neither of these addresses are available to bind.")
+	cmd.Flags().StringVar(&opts.Browser, "browser", "", "Open your default browser to the URL/fragment provided.  Protocol defaults to HTTP.  Address defaults to the first argument provided which defaults to localhost.")
 	// TODO support UID
 	return cmd
 }
@@ -155,8 +160,8 @@ func createDialer(method string, url *url.URL, opts PortForwardOptions) (streamh
 	return dialer, nil
 }
 
-func (f *defaultPortForwarder) ForwardPorts(method string, url *url.URL, opts PortForwardOptions) error {
-	dialer, err := createDialer(method, url, opts)
+func (f *defaultPortForwarder) ForwardPorts(method string, address *url.URL, opts PortForwardOptions) error {
+	dialer, err := createDialer(method, address, opts)
 	if err != nil {
 		return err
 	}
@@ -164,7 +169,71 @@ func (f *defaultPortForwarder) ForwardPorts(method string, url *url.URL, opts Po
 	if err != nil {
 		return err
 	}
-	return fw.ForwardPorts()
+
+	var fwErr error
+	wg := sync.WaitGroup{}
+	wg.Go(func() {
+		fwErr = fw.ForwardPorts()
+	})
+
+	if opts.Browser != "" {
+		go func() {
+			select {
+			case <-opts.ReadyChannel:
+				ports, getErr := fw.GetPorts()
+				if getErr != nil {
+					fmt.Fprintf(os.Stderr, "error getting ports: %s", getErr)
+					return
+				}
+
+				if len(ports) == 0 {
+					fmt.Fprintf(os.Stderr, "ports list is empty")
+					return
+				}
+
+				if len(opts.Address) == 0 {
+					fmt.Fprintf(os.Stderr, "address list is empty")
+					return
+				}
+
+				browserURL, urlErr := getBrowserURL(opts.Address[0], ports[0], opts.Browser)
+				if urlErr != nil {
+					fmt.Fprintf(os.Stderr, "error getting browser URL %s", urlErr)
+					return
+				}
+
+				openErr := browser.OpenURL(browserURL)
+				if openErr != nil {
+					fmt.Fprintf(os.Stderr, "error opening URL: %s", openErr)
+				}
+				return
+			case <-opts.StopChannel:
+				// just get out
+				return
+			}
+		}()
+	}
+
+	wg.Wait()
+	return fwErr
+}
+
+// getBrowserURL returns a URL suitable for opening in a local web browser based
+// on a partial url passed in as an argument.
+func getBrowserURL(host string, port portforward.ForwardedPort, urlFragment string) (string, error) {
+	browserURL, parseErr := url.Parse(urlFragment)
+	if parseErr != nil {
+		return "", fmt.Errorf("error parsing URL %q: %s", urlFragment, parseErr)
+	}
+
+	browserURL.Host = net.JoinHostPort(host, strconv.FormatUint(uint64(port.Local), 10))
+
+	// if a scheme wasn't specified on the URL, assume HTTP
+	if browserURL.Scheme == "" {
+		browserURL.Scheme = "http"
+	}
+
+	return browserURL.String(), nil
 }
 
 // splitPort splits port string which is in form of [LOCAL PORT]:REMOTE PORT

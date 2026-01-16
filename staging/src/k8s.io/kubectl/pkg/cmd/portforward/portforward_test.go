@@ -1038,3 +1038,85 @@ func TestCreateDialer(t *testing.T) {
 		t.Errorf("expected fallback dialer, got %#v", dialer)
 	}
 }
+
+func TestGetBrowserURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		fragment  string
+		address   string
+		expected  string
+		localPort uint16
+		expectErr bool
+	}{
+		{
+			name:      "just slash",
+			address:   "localhost",
+			fragment:  "/",
+			localPort: 8123,
+			expected:  "http://localhost:8123/",
+		},
+		{
+			name:      "nothing at all",
+			address:   "localhost",
+			fragment:  "",
+			localPort: 8123,
+			expected:  "http://localhost:8123",
+		},
+		{
+			name:      "bad fragment",
+			address:   "localhost",
+			fragment:  "_%",
+			localPort: 8123,
+			expectErr: true,
+		},
+		{
+			name:      "protocol and port specified",
+			address:   "localhost",
+			fragment:  "http://:90/foo", // port should be overwritten by the actual local port
+			localPort: 8123,
+			expected:  "http://localhost:8123/foo",
+		},
+		{
+			name:      "https",
+			address:   "localhost",
+			fragment:  "https:///foo",
+			localPort: 8443,
+			expected:  "https://localhost:8443/foo",
+		},
+		{
+			name:      "path only",
+			address:   "localhost",
+			fragment:  "/foo/bar",
+			localPort: 8123,
+			expected:  "http://localhost:8123/foo/bar",
+		},
+		{
+			name:      "query string only",
+			address:   "localhost",
+			fragment:  "?q=foo&r=bar",
+			localPort: 8456,
+			expected:  "http://localhost:8456?q=foo&r=bar",
+		},
+		{
+			name:      "path without leading slash",
+			address:   "localhost",
+			fragment:  "foo/bar",
+			localPort: 8080,
+			expected:  "http://localhost:8080/foo/bar",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := portforward.ForwardedPort{Local: uint16(tc.localPort)}
+			u, getErr := getBrowserURL(tc.address, p, tc.fragment)
+			if (getErr != nil) != tc.expectErr {
+				t.Errorf("mismatched error expectation, expected %t, got %q", tc.expectErr, getErr)
+			}
+			if u != tc.expected {
+				t.Errorf("expected %q, got %q", tc.expected, u)
+			}
+		})
+	}
+}
